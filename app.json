@@ -1,0 +1,20 @@
+{
+  "name": "WhatsApp Bot",
+  "description": "Node.js WhatsApp bot using whatsapp-web.js",
+  "keywords": ["nodejs", "whatsapp", "bot"],
+  "repository": "https://github.com/your-username/your-whatsapp-bot",
+  "logo": "https://small-sharp-tool.com/logo.svg",
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    },
+    {
+      "url": "https://github.com/jontewks/puppeteer-heroku-buildpack"
+    }
+  ],
+  "formation": {
+    "web": {
+      "quantity": 1
+    }
+  }
+}
