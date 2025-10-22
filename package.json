@@ -1,5 +1,5 @@
 {
-  "name": "sila-md",
+  "name": "sila-md-mini",
   "version": "1.0.0",
   "description": "WhatsApp Bot using Baileys Multi-Device with Local DB",
   "main": "./index.js",
@@ -24,7 +24,7 @@
     "moment-timezone": "^0.5.46",
     "node-fetch": "^3.3.2",
     "pino": "^9.3.0",
-    "ytsr": "^3.10.0",
+    "ytsr": "3.8.4",
     "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
