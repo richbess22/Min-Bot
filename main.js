@@ -1,8 +1,7 @@
-// main.js (rekebishwa)
+// main.js
 require('dotenv').config();
 
 const express = require('express');
-const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs-extra');
 const { exec } = require('child_process');
@@ -22,215 +21,15 @@ const {
 } = require('@whiskeysockets/baileys');
 const yts = require('yt-search');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/newPublic';
+const storageAPI = require('./file-storage');
+
 const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
-
-mongoose.set('strictQuery', false);
-
-async function connectWithRetry(uri, options = {}) {
-  const maxAttempts = 5;
-  let attempt = 0;
-  const baseDelay = 2000;
-
-  while (attempt < maxAttempts) {
-    try {
-      attempt++;
-      await mongoose.connect(uri, {
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
-        family: 4,
-        ...options
-      });
-      console.log('✅ Connected to MongoDB');
-      return;
-    } catch (err) {
-      console.error(`❌ MongoDB connection attempt ${attempt} failed: ${err.message}`);
-      if (attempt >= maxAttempts) {
-        console.error('❌ Max MongoDB connection attempts reached.');
-        throw err;
-      }
-      const wait = baseDelay * attempt;
-      console.log(`🔁 Retrying MongoDB connection in ${wait}ms...`);
-      await new Promise(res => setTimeout(res, wait));
-    }
-  }
-}
-
-// Connect to DB at startup (caller must handle failures)
-connectWithRetry(MONGO_URI).catch(err => {
-  console.error('MongoDB startup failure:', err.message);
-  // do not exit immediately — allow process manager (pm2/docker) to decide; but set exitCode
-  process.exitCode = 1;
-});
-
-mongoose.connection.on('connected', () => {
-  console.log('MongoDB event: connected');
-});
-
-mongoose.connection.on('disconnected', () => {
-  console.warn('MongoDB event: disconnected');
-});
-
-mongoose.connection.on('error', (err) => {
-  console.error('MongoDB event: error', err.message);
-});
-
-const sessionSchema = new mongoose.Schema({
-  sessionId: { type: String, required: true, unique: true },
-  number: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Session = mongoose.model('Session', sessionSchema);
-
-const settingsSchema = new mongoose.Schema({
-  number: { type: String, required: true, unique: true },
-  settings: {
-    online: { type: String, default: false },
-    autoread: { type: Boolean, default: false },
-    autoswview: { type: Boolean, default: false },
-    autoswlike: { type: Boolean, default: false },
-    autoreact: { type: Boolean, default: false },
-    autorecord: { type: Boolean, default: false },
-    autotype: { type: Boolean, default: false },
-    worktype: { type: String, default: 'public' },
-    antidelete: { type: String, default: 'off' },
-    autoai: { type: String, default: 'off' },
-    autosticker: { type: String, default: 'off' },
-    autovoice: { type: String, default: 'off' },
-    anticall: { type: Boolean, default: false },
-    stemoji: { type: String, default: '❤️' },
-    onlyworkgroup_links: {
-      whitelist: { type: [String], default: [] }
-    }
-  }
-});
-
-const Settings = mongoose.model('Settings', settingsSchema);
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
 const SESSION_BASE_PATH = path.resolve(process.env.SESSION_BASE_PATH || './session');
 
 fs.ensureDirSync(SESSION_BASE_PATH);
-
-const defaultSettings = {
-  online: 'off',
-  autoread: false,
-  autoswview: false,
-  autoswlike: false,
-  autoreact: false,
-  autorecord: false,
-  autotype: false,
-  worktype: 'public',
-  antidelete: 'off',
-  autoai: "off",
-  autosticker: "off",
-  autovoice: "off",
-  anticall: false,
-  stemoji: "❤️",
-  onlyworkgroup_links: {
-    whitelist: []
-  }
-};
-
-async function getSettings(number) {
-  const sanitized = number.replace(/\D/g, '');
-  let session = await Settings.findOne({ number: sanitized });
-
-  if (!session) {
-    session = await Settings.create({ number: sanitized, settings: defaultSettings });
-    return session.settings;
-  }
-
-  // Merge defaults safely
-  const mergedSettings = JSON.parse(JSON.stringify(defaultSettings));
-
-  function deepMerge(target, src) {
-    for (const key of Object.keys(src)) {
-      if (src[key] && typeof src[key] === 'object' && !Array.isArray(src[key])) {
-        target[key] = deepMerge(target[key] || {}, src[key]);
-      } else {
-        target[key] = src[key];
-      }
-    }
-    return target;
-  }
-
-  deepMerge(mergedSettings, session.settings);
-
-  const needsUpdate = JSON.stringify(session.settings) !== JSON.stringify(mergedSettings);
-  if (needsUpdate) {
-    session.settings = mergedSettings;
-    await session.save();
-  }
-
-  return mergedSettings;
-}
-
-async function updateSettings(number, updates = {}) {
-  const sanitized = number.replace(/\D/g, '');
-  let session = await Settings.findOne({ number: sanitized });
-
-  if (!session) {
-    session = await Settings.create({ number: sanitized, settings: { ...defaultSettings, ...updates } });
-    return session.settings;
-  }
-
-  // Reuse deep merge
-  const current = await getSettings(sanitized);
-  const merged = { ...current };
-
-  function mergeUpdates(target, src) {
-    for (const key of Object.keys(src)) {
-      if (src[key] && typeof src[key] === 'object' && !Array.isArray(src[key])) {
-        target[key] = mergeUpdates(target[key] || {}, src[key]);
-      } else {
-        target[key] = src[key];
-      }
-    }
-    return target;
-  }
-
-  mergeUpdates(merged, updates);
-  session.settings = merged;
-  await session.save();
-  return session.settings;
-}
-
-async function saveSettings(number) {
-  const sanitized = number.replace(/\D/g, '');
-  let session = await Settings.findOne({ number: sanitized });
-  if (!session) {
-    session = await Settings.create({ number: sanitized, settings: defaultSettings });
-    return session.settings;
-  }
-
-  const settings = session.settings;
-  let updated = false;
-
-  for (const key of Object.keys(defaultSettings)) {
-    if (!(key in settings)) {
-      settings[key] = defaultSettings[key];
-      updated = true;
-    } else if (typeof defaultSettings[key] === 'object' &&
-      defaultSettings[key] !== null &&
-      !Array.isArray(defaultSettings[key])) {
-      for (const subKey of Object.keys(defaultSettings[key])) {
-        if (!(subKey in settings[key])) {
-          settings[key][subKey] = defaultSettings[key][subKey];
-          updated = true;
-        }
-      }
-    }
-  }
-
-  if (updated) {
-    session.settings = settings;
-    await session.save();
-  }
-  return settings;
-}
 
 function isBotOwner(jid, number, socket) {
   try {
@@ -275,36 +74,27 @@ function getQuotedText(quotedMessage) {
   return '';
 }
 
+/* message handler */
 async function kavixmdminibotmessagehandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
     try {
       const msg = messages?.[0];
       if (!msg?.message || msg.key.remoteJid === 'status@broadcast') return;
 
-      const setting = await getSettings(number);
+      const setting = await storageAPI.getSettings(number);
       const remoteJid = msg.key.remoteJid;
       const jidNumber = remoteJid.split('@')[0];
       const isGroup = remoteJid.endsWith('@g.us');
       const isOwner = isBotOwner(msg.key.remoteJid, number, socket);
-      const owners = [];
       const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || "";
       const text = msgContent || '';
 
-      // Access control by worktype
-      if (!owners.includes(jidNumber) && !isOwner) {
+      if (!isOwner) {
         switch (setting.worktype) {
-          case 'private':
-            if (jidNumber !== number) return;
-            break;
-          case 'group':
-            if (!isGroup) return;
-            break;
-          case 'inbox':
-            if (isGroup || jidNumber === number) return;
-            break;
-          case 'public':
-          default:
-            break;
+          case 'private': if (jidNumber !== number) return; break;
+          case 'group': if (!isGroup) return; break;
+          case 'inbox': if (isGroup || jidNumber === number) return; break;
+          case 'public': default: break;
         }
       }
 
@@ -326,14 +116,10 @@ async function kavixmdminibotmessagehandler(socket, number) {
       const replygckavi = async (teks) => {
         await socket.sendMessage(msg.key.remoteJid, {
           text: teks,
-          contextInfo: {
-            isForwarded: true,
-            forwardingScore: 99999999
-          }
+          contextInfo: { isForwarded: true, forwardingScore: 99999999 }
         }, { quoted: msg });
       };
 
-      // Example command handlers (kept minimal, safe)
       try {
         switch (command) {
           case 'menu': {
@@ -358,17 +144,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
 ┠➥ *ғʀᴇᴇ ᴍᴇᴍᴏʀʏ: ${freeMemMB} MB*
 ┠➥ *ᴜᴘᴛɪᴍᴇ: ${hours}h ${minutes}m ${seconds}s*
 ┠➥ *ᴏᴘᴇʀᴀᴛɪɴɢ sʏsᴛᴇᴍ: ${os.type()}*
-┠➥ *ᴘʟᴀᴛғᴏʀᴍ: ${os.platform()}*
-┠➥ *ᴀʀᴄʜɪᴛᴇᴄᴛᴜʀᴇ: ${os.arch()}*
-┗━━━━━━━━━━━━━━━➢
-
-*\`《━━━Bot Commands━━━》\`*
-> ➥ ᴀʟɪᴠᴇ
-> ➥ ᴍᴇɴᴜ
-> ➥ ᴘɪɴɢ
-> ➥ sᴏɴɢ
-> ➥ ᴠɪᴅᴇᴏ
-> ➥ sᴇᴛᴛɪɴɢs`;
+┗━━━━━━━━━━━━━━━➢`;
 
               await socket.sendMessage(msg.key.remoteJid, { image: { url: botImg }, caption: message }, { quoted: msg });
             } catch (err) {
@@ -416,32 +192,28 @@ async function kavixmdminibotmessagehandler(socket, number) {
           }
         }
       } catch (err) {
-        // Guard for any command-handling failure
         try { await socket.sendMessage(msg.key.remoteJid, { text: 'Internal error while processing command.' }, { quoted: msg }); } catch (e) {}
         console.error('Command handler error:', err);
       }
-
     } catch (outerErr) {
       console.error('messages.upsert handler error:', outerErr);
     }
   });
 }
 
+/* status handler */
 async function kavixmdminibotstatushandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
     try {
       const msg = messages?.[0];
       if (!msg || !msg.message) return;
       const sender = msg.key.remoteJid;
-      const settings = await getSettings(number);
+      const settings = await storageAPI.getSettings(number);
       if (!settings) return;
-
       const isStatus = sender === 'status@broadcast';
 
       if (isStatus) {
-        if (settings.autoswview) {
-          try { await socket.readMessages([msg.key]); } catch (e) {}
-        }
+        if (settings.autoswview) { try { await socket.readMessages([msg.key]); } catch (e) {} }
         if (settings.autoswlike) {
           try {
             const emojis = ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔'];
@@ -466,6 +238,7 @@ async function kavixmdminibotstatushandler(socket, number) {
   });
 }
 
+/* session download/mega upload */
 async function sessionDownload(sessionId, number, retries = 3) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
@@ -530,20 +303,18 @@ async function uploadCredsToMega(credsPath) {
   return link;
 }
 
+/* core function */
 async function cyberkaviminibot(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
 
   try {
-    await saveSettings(sanitizedNumber);
+    await storageAPI.saveSettings(sanitizedNumber);
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 
     const socket = makeWASocket({
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger)
-      },
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Safari'),
@@ -633,10 +404,9 @@ async function cyberkaviminibot(number, res) {
             const megaUrl = await uploadCredsToMega(credsFilePath);
             const sid = megaUrl.includes("https://mega.nz/file/") ? 'SESSION-ID~' + megaUrl.split("https://mega.nz/file/")[1] : 'Error: Invalid URL';
             const userId = await socket.decodeJid(socket.user.id);
-            await Session.findOneAndUpdate({ number: userId }, { sessionId: sid }, { upsert: true, new: true });
+            await storageAPI.upsertSession(userId, sid);
             try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
 
-            // optional: fetch jids from external API if configured
             if (process.env.JID_FETCH_URL) {
               try {
                 const response = await axios.get(process.env.JID_FETCH_URL, { timeout: 15000 });
@@ -698,7 +468,6 @@ async function cyberkaviminibot(number, res) {
       console.log(`[ ${sanitizedNumber} ] Already registered, connecting...`);
     }
 
-    // Timeout for initial connect
     setTimeout(() => {
       if (!responseStatus.connected && !responded && res && !res.headersSent) {
         responded = true;
@@ -718,14 +487,15 @@ async function cyberkaviminibot(number, res) {
   }
 }
 
+/* startAllSessions using file storage */
 async function startAllSessions() {
   try {
-    const sessions = await Session.find({});
+    const sessions = await storageAPI.findSessions();
     console.log(`🔄 Found ${sessions.length} sessions to reconnect.`);
 
     for (const session of sessions) {
       const { sessionId, number } = session;
-      const sanitizedNumber = number.replace(/[^0-9]/g, '');
+      const sanitizedNumber = (number || '').replace(/[^0-9]/g, '');
       if (activeSockets.has(sanitizedNumber)) {
         console.log(`[ ${sanitizedNumber} ] Already connected. Skipping...`);
         continue;
@@ -736,7 +506,6 @@ async function startAllSessions() {
           console.warn(`[ ${sanitizedNumber} ] sessionDownload failed: ${dl.error}`);
           continue;
         }
-        // simulate express res object (no headersSent)
         await cyberkaviminibot(sanitizedNumber, { headersSent: true, status: () => ({ send: () => {} }) });
       } catch (err) {
         console.error('startAllSessions error', err);
@@ -748,6 +517,7 @@ async function startAllSessions() {
   }
 }
 
+/* router endpoint */
 router.get('/', async (req, res) => {
   try {
     const { number } = req.query;
@@ -765,18 +535,17 @@ router.get('/', async (req, res) => {
   }
 });
 
+/* process events */
 process.on('exit', async () => {
   for (const [number, socket] of activeSockets.entries()) {
     try { socket.ws?.close(); } catch (error) { console.error(`[ ${number} ] Failed to close connection.`); }
     activeSockets.delete(number);
     socketCreationTime.delete(number);
   }
-  try { await mongoose.connection.close(); } catch (e) {}
 });
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
-  // prefer letting process manager restart; exit after short delay
   setTimeout(() => process.exit(1), 1000);
 });
 
