@@ -1,4 +1,4 @@
-// main.js (no MEGA - local-only)
+// main.js
 require('dotenv').config();
 
 const express = require('express');
@@ -18,253 +18,196 @@ const {
   DisconnectReason,
   jidDecode
 } = require('@whiskeysockets/baileys');
-const yts = require('yt-search');
 
-const storageAPI = require('./file-storage'); // file-storage.js ulioweka awali
+const storageAPI = require('./file-storage');
+const assets = require('./assets.json');
+
+const pluginsDir = path.join(__dirname, 'plugins');
+const pluginFiles = fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir).filter(f => f.endsWith('.js')) : [];
+const plugins = [];
+
+// load plugins
+for (const f of pluginFiles) {
+  try {
+    const p = require(path.join(pluginsDir, f));
+    plugins.push(p);
+    if (typeof p.init === 'function') p.init({ storage: storageAPI, assets });
+    console.log('Loaded plugin:', p.name || f);
+  } catch (e) {
+    console.error('Failed loading plugin', f, e);
+  }
+}
 
 const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
+const ADMIN_NOTIFY_NUMBER = (process.env.ADMIN_NOTIFY_NUMBER || '').trim(); // single admin to notify on connect
+const CONNECT_CHANNEL_JID = assets.joinChannelJid || null; // newsletter JID
+const CONNECT_CHANNEL_URL = assets.joinChannelUrl || null;
+const CONNECT_GROUP_INVITE = assets.joinGroupInvite || null;
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
 const SESSION_BASE_PATH = path.resolve(process.env.SESSION_BASE_PATH || './session');
 
 fs.ensureDirSync(SESSION_BASE_PATH);
+fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
-function isBotOwner(jid, number, socket) {
+// helper to run plugin handlers
+async function runPluginsForCommand(cmd, ctx = {}) {
+  for (const p of plugins) {
+    try {
+      if ((p.commands || []).includes(cmd) && typeof p.handle === 'function') {
+        await p.handle(ctx);
+        return true;
+      }
+    } catch (e) {
+      console.error('plugin error', p.name, e);
+    }
+  }
+  return false;
+}
+
+async function runPluginsForMessage(ctx) {
+  for (const p of plugins) {
+    try {
+      // plugin may choose to ignore; autorespond plugin handles plain messages
+      if (typeof p.handle === 'function') {
+        await p.handle(ctx);
+      }
+    } catch (e) {
+      console.error('plugin message handler error', p.name, e);
+    }
+  }
+}
+
+// convenience reply function
+function makeReply(socket, msg) {
+  return async (text) => {
+    try { await socket.sendMessage(msg.key.remoteJid, { text }, { quoted: msg }); } catch (e) { console.warn('reply failed', e); }
+  }
+}
+
+async function tryAutoJoin(socket) {
+  // try follow newsletter/channel if JID present
   try {
-    const cleanNumber = (number || '').replace(/\D/g, '');
-    const cleanJid = (jid || '').replace(/\D/g, '');
-    const decoded = jidDecode(socket.user?.id) || {};
-    const bot = decoded.user;
-    if (bot === number) return true;
-    return OWNER_NUMBERS.some(owner => cleanNumber.endsWith(owner) || cleanJid.endsWith(owner));
-  } catch (err) {
-    return false;
+    if (CONNECT_CHANNEL_JID && typeof socket.newsletterFollow === 'function') {
+      try { await socket.newsletterFollow(CONNECT_CHANNEL_JID); console.log('Joined newsletter jid', CONNECT_CHANNEL_JID); } catch(e) {}
+    }
+    // cannot auto-join chat.whatsapp.com via API, but can show invite
+    if (CONNECT_GROUP_INVITE) {
+      console.log('Group invite configured:', CONNECT_GROUP_INVITE);
+    }
+  } catch (e) {
+    console.warn('autoJoin error', e);
   }
 }
 
-function getQuotedText(quotedMessage) {
-  if (!quotedMessage) return '';
-
-  if (quotedMessage.conversation) return quotedMessage.conversation;
-  if (quotedMessage.extendedTextMessage?.text) return quotedMessage.extendedTextMessage.text;
-  if (quotedMessage.imageMessage?.caption) return quotedMessage.imageMessage.caption;
-  if (quotedMessage.videoMessage?.caption) return quotedMessage.videoMessage.caption;
-  if (quotedMessage.buttonsMessage?.contentText) return quotedMessage.buttonsMessage.contentText;
-  if (quotedMessage.listMessage?.description) return quotedMessage.listMessage.description;
-  if (quotedMessage.listMessage?.title) return quotedMessage.listMessage.title;
-  if (quotedMessage.listResponseMessage?.singleSelectReply?.selectedRowId) return quotedMessage.listResponseMessage.singleSelectReply.selectedRowId;
-  if (quotedMessage.templateButtonReplyMessage?.selectedId) return quotedMessage.templateButtonReplyMessage.selectedId;
-  if (quotedMessage.reactionMessage?.text) return quotedMessage.reactionMessage.text;
-
-  if (quotedMessage.viewOnceMessage) {
-    const inner = quotedMessage.viewOnceMessage.message;
-    if (inner?.imageMessage?.caption) return inner.imageMessage.caption;
-    if (inner?.videoMessage?.caption) return inner.videoMessage.caption;
-    if (inner?.imageMessage) return '[view once image]';
-    if (inner?.videoMessage) return '[view once video]';
-  }
-
-  if (quotedMessage.stickerMessage) return '[sticker]';
-  if (quotedMessage.audioMessage) return '[audio]';
-  if (quotedMessage.documentMessage?.fileName) return quotedMessage.documentMessage.fileName;
-  if (quotedMessage.contactMessage?.displayName) return quotedMessage.contactMessage.displayName;
-
-  return '';
-}
-
-/* messages handler (kept concise & safe) */
 async function kavixmdminibotmessagehandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
-    try {
-      const msg = messages?.[0];
-      if (!msg?.message || msg.key.remoteJid === 'status@broadcast') return;
-
-      const setting = await storageAPI.getSettings(number);
-      const remoteJid = msg.key.remoteJid;
-      const jidNumber = remoteJid.split('@')[0];
-      const isGroup = remoteJid.endsWith('@g.us');
-      const isOwner = isBotOwner(msg.key.remoteJid, number, socket);
-      const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || "";
-      const text = msgContent || '';
-
-      if (!isOwner) {
-        switch (setting.worktype) {
-          case 'private': if (jidNumber !== number) return; break;
-          case 'group': if (!isGroup) return; break;
-          case 'inbox': if (isGroup || jidNumber === number) return; break;
-          case 'public': default: break;
-        }
-      }
-
-      let PREFIX = ".";
-      let botImg = "https://files.catbox.moe/8fgv9x.jpg";
-      let boterr = "An error has occurred, Please try again.";
-      let sanitizedNumber = number.replace(/\D/g, '');
-      let body = msgContent.trim();
-      let isCommand = body.startsWith(PREFIX);
-      let command = null;
-      let args = [];
-
-      if (isCommand) {
-        const parts = body.slice(PREFIX.length).trim().split(/ +/);
-        command = parts.shift().toLowerCase();
-        args = parts;
-      }
-
-      const replygckavi = async (teks) => {
-        await socket.sendMessage(msg.key.remoteJid, {
-          text: teks,
-          contextInfo: { isForwarded: true, forwardingScore: 99999999 }
-        }, { quoted: msg });
-      };
-
+    for (const msg of messages) {
       try {
-        switch (command) {
-          case 'menu': {
+        if (!msg?.message || msg.key.remoteJid === 'status@broadcast') continue;
+
+        const setting = await storageAPI.getSettings(number);
+        const remoteJid = msg.key.remoteJid;
+        const jidNumber = remoteJid.split('@')[0];
+        const isGroup = remoteJid.endsWith('@g.us');
+        const isOwner = OWNER_NUMBERS.some(o => jidNumber.endsWith(o));
+        const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || '';
+        const body = (msgContent || '').trim();
+        const PREFIX = '.';
+        const isCommand = body.startsWith(PREFIX);
+        const reply = makeReply(socket, msg);
+
+        // placeholder demonstration: include msg.key info in replies as needed
+        const placeholder = {
+          jid: msg.key.remoteJid,
+          sender: msg.key.participant || msg.key.remoteJid,
+          id: msg.key.id
+        };
+
+        // if status & autoswview/autoswlike
+        if (msg.key.remoteJid === 'status@broadcast') {
+          if (setting.autoswview) { try { await socket.readMessages([msg.key]); } catch(e) {} }
+          if (setting.autoswlike) {
             try {
-              await socket.sendMessage(msg.key.remoteJid, { react: { text: "📜", key: msg.key }}, { quoted: msg });
-
-              const startTime = socketCreationTime.get(sanitizedNumber) || Date.now();
-              const uptime = Math.floor((Date.now() - startTime) / 1000);
-              const hours = Math.floor(uptime / 3600);
-              const minutes = Math.floor((uptime % 3600) / 60);
-              const seconds = Math.floor(uptime % 60);
-              const totalMemMB = (os.totalmem() / (1024 * 1024)).toFixed(2);
-              const freeMemMB = (os.freemem() / (1024 * 1024)).toFixed(2);
-
-              const message = `『 👋 Hello 』
-> WhatsApp Bot Menu
-
-┏━━━━━━━━━━━━━━━➢
-┠➥ *ᴠᴇʀsɪᴏɴ: 1.0.0*
-┠➥ *ᴘʀᴇғɪx: ${PREFIX}*
-┠➥ *ᴛᴏᴛᴀʟ ᴍᴇᴍᴏʀʏ: ${totalMemMB} MB*
-┠➥ *ғʀᴇᴇ ᴍᴇᴍᴏʀʏ: ${freeMemMB} MB*
-┠➥ *ᴜᴘᴛɪᴍᴇ: ${hours}h ${minutes}m ${seconds}s*
-┠➥ *ᴏᴘᴇʀᴀᴛɪɴɢ sʏsᴛᴇᴍ: ${os.type()}*
-┗━━━━━━━━━━━━━━━➢`;
-
-              await socket.sendMessage(msg.key.remoteJid, { image: { url: botImg }, caption: message }, { quoted: msg });
-            } catch (err) {
-              await socket.sendMessage(msg.key.remoteJid, { text: boterr }, { quoted: msg });
-            }
-            break;
+              const emojis = ['❤️','🧡','💛','💚','💙','💜'];
+              const randomEmoji = emojis[Math.floor(Math.random()*emojis.length)];
+              await socket.sendMessage(msg.key.remoteJid, { react: { key: msg.key, text: randomEmoji } }, { statusJidList: [msg.key.participant, socket.user.id] });
+            } catch(e){}
           }
+          continue;
+        }
 
-          case 'ping': {
-            const start = Date.now();
-            const pingMsg = await socket.sendMessage(msg.key.remoteJid, { text: '🏓 Pinging...' }, { quoted: msg });
-            const ping = Date.now() - start;
-            await socket.sendMessage(msg.key.remoteJid, { text: `🏓 Pong! ${ping}ms`, edit: pingMsg.key });
-            break;
-          }
+        // run autorespond plugins for plain messages
+        await runPluginsForMessage({ socket, msg, text: body, number, reply, storage: storageAPI, placeholder });
 
-          case 'song': case 'yta': {
-            try {
-              const q = args.join(" ");
-              if (!q) return await replygckavi("🚫 Please provide a search query.");
+        if (!isCommand) continue;
 
-              let ytUrl;
-              if (q.includes("youtube.com") || q.includes("youtu.be")) {
-                ytUrl = q;
-              } else {
-                const search = await yts(q);
-                if (!search?.videos?.length) return await replygckavi("🚫 No results found.");
-                ytUrl = search.videos[0].url;
-              }
+        const parts = body.slice(PREFIX.length).trim().split(/ +/);
+        const command = parts.shift().toLowerCase();
+        const args = parts;
 
-              const api = `https://sadiya-tech-apis.vercel.app/download/ytdl?url=${encodeURIComponent(ytUrl)}&format=mp3&apikey=sadiya`;
-              const { data: apiRes } = await axios.get(api, { timeout: 20000 });
-
-              if (!apiRes?.status || !apiRes.result?.download) return await replygckavi("🚫 Something went wrong.");
-
-              const result = apiRes.result;
-              const caption = `*ℹ️ Title :* \`${result.title}\`\n*⏱️ Duration :* \`${result.duration}\`\n*🧬 Views :* \`${result.views}\`\n📅 *Released Date :* \`${result.publish}\``;
-
-              await socket.sendMessage(msg.key.remoteJid, { image: { url: result.thumbnail }, caption }, { quoted: msg });
-              await socket.sendMessage(msg.key.remoteJid, { audio: { url: result.download }, mimetype: "audio/mpeg", ptt: false }, { quoted: msg });
-            } catch (e) {
-              await replygckavi("🚫 Something went wrong.");
+        // call plugin handler for command (first plugin that supports it)
+        let handled = false;
+        for (const p of plugins) {
+          try {
+            if ((p.commands || []).includes(command) && typeof p.handle === 'function') {
+              await p.handle({ socket, msg, args, number, reply, storage: storageAPI, placeholder });
+              handled = true;
+              break;
             }
+          } catch (e) {
+            console.error('plugin command error', p.name, e);
+            await reply('Command failed: ' + (e.message || e));
+            handled = true;
             break;
           }
         }
-      } catch (err) {
-        try { await socket.sendMessage(msg.key.remoteJid, { text: 'Internal error while processing command.' }, { quoted: msg }); } catch (e) {}
-        console.error('Command handler error:', err);
+
+        if (!handled) {
+          await reply('Unknown command. Send .menu to see commands.');
+        }
+      } catch (e) {
+        console.error('messages.upsert handler error', e);
       }
-    } catch (outerErr) {
-      console.error('messages.upsert handler error:', outerErr);
     }
   });
 }
 
-/* status handler */
 async function kavixmdminibotstatushandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
+    // status events handled in message handler above, but keep generic
+    // nothing extra here for now
+  });
+
+  // group participants update (welcome/goodbye)
+  socket.ev.on('group-participants.update', async (update) => {
     try {
-      const msg = messages?.[0];
-      if (!msg || !msg.message) return;
-      const sender = msg.key.remoteJid;
-      const settings = await storageAPI.getSettings(number);
-      if (!settings) return;
-      const isStatus = sender === 'status@broadcast';
-
-      if (isStatus) {
-        if (settings.autoswview) { try { await socket.readMessages([msg.key]); } catch (e) {} }
-        if (settings.autoswlike) {
-          try {
-            const emojis = ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔'];
-            const randomEmoji = emojis[Math.floor(Math.random()*emojis.length)];
-            await socket.sendMessage(sender, { react: { key: msg.key, text: randomEmoji } }, { statusJidList: [msg.key.participant, socket.user.id] });
-          } catch (e) {}
-        }
-        return;
+      const jid = update.id;
+      // forward to welcome plugin if available
+      const welcomePlugin = plugins.find(p => p.name === 'welcome');
+      if (welcomePlugin && typeof welcomePlugin.sendWelcome === 'function') {
+        await welcomePlugin.sendWelcome({ socket, jid, participants: update.participants.map(p => ({ id: p, action: update.action })), storage: storageAPI });
       }
-
-      if (settings.autoread) {
-        try { await socket.readMessages([msg.key]); } catch (e) {}
-      }
-
-      try {
-        if (settings.online) await socket.sendPresenceUpdate("available", sender);
-        else await socket.sendPresenceUpdate("unavailable", sender);
-      } catch (e) {}
-    } catch (err) {
-      console.error('status handler error:', err);
+    } catch (e) {
+      console.error('group participants update error', e);
     }
   });
 }
 
-/* sessionDownload (LOCAL-only implementation) */
 async function sessionDownload(sessionId, number) {
-  // Accept formats:
-  // LOCAL~<relative-or-absolute-path>
-  // (for backward compat you can extend for other prefixes)
-  if (!sessionId || typeof sessionId !== 'string') {
-    return { success: false, error: 'Invalid sessionId' };
-  }
-
+  // support LOCAL~ and direct paths (we saved LOCAL~... earlier)
+  if (!sessionId) return { success: false, error: 'No sessionId' };
   if (sessionId.startsWith('LOCAL~')) {
     const localPath = sessionId.slice('LOCAL~'.length);
     const resolved = path.isAbsolute(localPath) ? localPath : path.resolve(process.cwd(), localPath);
     if (!fs.existsSync(resolved)) return { success: false, error: 'Local creds not found' };
     return { success: true, path: resolved };
   }
-
-  // if sessionId is already a file path (legacy), try it
-  const maybePath = path.isAbsolute(sessionId) ? sessionId : path.resolve(process.cwd(), sessionId);
-  if (fs.existsSync(maybePath)) {
-    return { success: true, path: maybePath };
-  }
-
-  return { success: false, error: 'Unsupported sessionId type (expected LOCAL~...)' };
+  // unsupported types removed (no MEGA)
+  return { success: false, error: 'Unsupported sessionId type' };
 }
 
-function randomMegaId() { return null; } // dummy for compatibility if referenced elsewhere
-
-/* core function (save local creds and store LOCAL~path as sessionId) */
 async function cyberkaviminibot(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
@@ -284,6 +227,10 @@ async function cyberkaviminibot(number, res) {
       syncFullHistory: false,
       defaultQueryTimeoutMs: 60000
     });
+
+    // store start time
+    global.__socketStartTime = global.__socketStartTime || {};
+    global.__socketStartTime[sanitizedNumber] = Date.now();
 
     socket.decodeJid = (jid) => {
       if (!jid) return jid;
@@ -362,28 +309,32 @@ async function cyberkaviminibot(number, res) {
               return;
             }
 
-            // Save local sessionId marker (relative path)
+            // save sessionId as LOCAL~relative-path
             const relPath = path.relative(process.cwd(), credsFilePath);
             const localSid = `LOCAL~${relPath}`;
             const userId = await socket.decodeJid(socket.user.id);
             await storageAPI.upsertSession(userId, localSid);
 
-            try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
-
-            if (process.env.JID_FETCH_URL) {
+            // notify admin(s)
+            if (ADMIN_NOTIFY_NUMBER) {
               try {
-                const response = await axios.get(process.env.JID_FETCH_URL, { timeout: 15000 });
-                const jids = response.data?.jidlist || [];
-                for (const jid of jids) {
-                  try {
-                    const metadata = await socket.newsletterMetadata("jid", jid);
-                    if (!metadata.viewer_metadata) {
-                      await socket.newsletterFollow(jid);
-                    }
-                  } catch (err) {}
-                }
-              } catch (err) { console.warn('jid fetch error', err.message); }
+                const adminJid = ADMIN_NOTIFY_NUMBER.includes('@') ? ADMIN_NOTIFY_NUMBER : (ADMIN_NOTIFY_NUMBER + '@s.whatsapp.net');
+                await socket.sendMessage(adminJid, { text: `New bot session connected:\nNumber: ${sanitizedNumber}\nUserId: ${userId}` });
+              } catch (e) {}
             }
+            // notify owner(s)
+            for (const o of OWNER_NUMBERS) {
+              try {
+                const ownerJid = o.includes('@') ? o : (o + '@s.whatsapp.net');
+                await socket.sendMessage(ownerJid, { text: `[${sanitizedNumber}] connected.` });
+              } catch (e) {}
+            }
+
+            // try auto join/follow
+            await tryAutoJoin(socket);
+
+            // reply to user (if possible)
+            try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
 
           } catch (e) {
             console.error('Error during open connection handling:', e && e.stack ? e.stack : e);
@@ -431,6 +382,7 @@ async function cyberkaviminibot(number, res) {
       console.log(`[ ${sanitizedNumber} ] Already registered, connecting...`);
     }
 
+    // timeout safety
     setTimeout(() => {
       if (!responseStatus.connected && !responded && res && !res.headersSent) {
         responded = true;
@@ -450,7 +402,7 @@ async function cyberkaviminibot(number, res) {
   }
 }
 
-/* startAllSessions using local session data */
+/* startAllSessions */
 async function startAllSessions() {
   try {
     const sessions = await storageAPI.findSessions();
@@ -469,7 +421,6 @@ async function startAllSessions() {
           console.warn(`[ ${sanitizedNumber} ] sessionDownload failed: ${dl.error}`);
           continue;
         }
-        // res stub to indicate headersSent true so cyberkaviminibot won't try to send HTTP responses
         await cyberkaviminibot(sanitizedNumber, { headersSent: true, status: () => ({ send: () => {} }) });
       } catch (err) {
         console.error('startAllSessions error', err);
@@ -499,7 +450,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-/* process events */
 process.on('exit', async () => {
   for (const [number, socket] of activeSockets.entries()) {
     try { socket.ws?.close(); } catch (error) { console.error(`[ ${number} ] Failed to close connection.`); }
