@@ -9,6 +9,8 @@ const router = express.Router();
 const pino = require('pino');
 const os = require('os');
 const axios = require('axios');
+
+const { Storage, File } = require('megajs'); // <-- restored MEGA
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -38,7 +40,7 @@ for (const f of pluginFiles) {
   }
 }
 
-const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
+const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || process.env.OWNER_NUMBER || '').split(',').map(s => s.trim()).filter(Boolean);
 const ADMIN_NOTIFY_NUMBER = (process.env.ADMIN_NOTIFY_NUMBER || '').trim(); // single admin to notify on connect
 const CONNECT_CHANNEL_JID = assets.joinChannelJid || null; // newsletter JID
 const CONNECT_CHANNEL_URL = assets.joinChannelUrl || null;
@@ -69,7 +71,6 @@ async function runPluginsForCommand(cmd, ctx = {}) {
 async function runPluginsForMessage(ctx) {
   for (const p of plugins) {
     try {
-      // plugin may choose to ignore; autorespond plugin handles plain messages
       if (typeof p.handle === 'function') {
         await p.handle(ctx);
       }
@@ -79,7 +80,6 @@ async function runPluginsForMessage(ctx) {
   }
 }
 
-// convenience reply function
 function makeReply(socket, msg) {
   return async (text) => {
     try { await socket.sendMessage(msg.key.remoteJid, { text }, { quoted: msg }); } catch (e) { console.warn('reply failed', e); }
@@ -87,12 +87,10 @@ function makeReply(socket, msg) {
 }
 
 async function tryAutoJoin(socket) {
-  // try follow newsletter/channel if JID present
   try {
     if (CONNECT_CHANNEL_JID && typeof socket.newsletterFollow === 'function') {
       try { await socket.newsletterFollow(CONNECT_CHANNEL_JID); console.log('Joined newsletter jid', CONNECT_CHANNEL_JID); } catch(e) {}
     }
-    // cannot auto-join chat.whatsapp.com via API, but can show invite
     if (CONNECT_GROUP_INVITE) {
       console.log('Group invite configured:', CONNECT_GROUP_INVITE);
     }
@@ -114,18 +112,16 @@ async function kavixmdminibotmessagehandler(socket, number) {
         const isOwner = OWNER_NUMBERS.some(o => jidNumber.endsWith(o));
         const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || '';
         const body = (msgContent || '').trim();
-        const PREFIX = '.';
+        const PREFIX = process.env.PREFIX || '.';
         const isCommand = body.startsWith(PREFIX);
         const reply = makeReply(socket, msg);
 
-        // placeholder demonstration: include msg.key info in replies as needed
         const placeholder = {
           jid: msg.key.remoteJid,
           sender: msg.key.participant || msg.key.remoteJid,
           id: msg.key.id
         };
 
-        // if status & autoswview/autoswlike
         if (msg.key.remoteJid === 'status@broadcast') {
           if (setting.autoswview) { try { await socket.readMessages([msg.key]); } catch(e) {} }
           if (setting.autoswlike) {
@@ -138,7 +134,6 @@ async function kavixmdminibotmessagehandler(socket, number) {
           continue;
         }
 
-        // run autorespond plugins for plain messages
         await runPluginsForMessage({ socket, msg, text: body, number, reply, storage: storageAPI, placeholder });
 
         if (!isCommand) continue;
@@ -147,7 +142,6 @@ async function kavixmdminibotmessagehandler(socket, number) {
         const command = parts.shift().toLowerCase();
         const args = parts;
 
-        // call plugin handler for command (first plugin that supports it)
         let handled = false;
         for (const p of plugins) {
           try {
@@ -175,16 +169,10 @@ async function kavixmdminibotmessagehandler(socket, number) {
 }
 
 async function kavixmdminibotstatushandler(socket, number) {
-  socket.ev.on('messages.upsert', async ({ messages }) => {
-    // status events handled in message handler above, but keep generic
-    // nothing extra here for now
-  });
-
-  // group participants update (welcome/goodbye)
+  socket.ev.on('messages.upsert', async ({ messages }) => {});
   socket.ev.on('group-participants.update', async (update) => {
     try {
       const jid = update.id;
-      // forward to welcome plugin if available
       const welcomePlugin = plugins.find(p => p.name === 'welcome');
       if (welcomePlugin && typeof welcomePlugin.sendWelcome === 'function') {
         await welcomePlugin.sendWelcome({ socket, jid, participants: update.participants.map(p => ({ id: p, action: update.action })), storage: storageAPI });
@@ -195,19 +183,85 @@ async function kavixmdminibotstatushandler(socket, number) {
   });
 }
 
-async function sessionDownload(sessionId, number) {
-  // support LOCAL~ and direct paths (we saved LOCAL~... earlier)
-  if (!sessionId) return { success: false, error: 'No sessionId' };
+/* session download/MEGA upload functions restored */
+async function sessionDownload(sessionId, number, retries = 3) {
+  const sanitizedNumber = (number || '').replace(/[^0-9]/g, '');
+  const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
+  const credsFilePath = path.join(sessionPath, 'creds.json');
+
+  if (!sessionId || typeof sessionId !== 'string') {
+    return { success: false, error: 'Invalid session ID format' };
+  }
+
+  // LOCAL fallback
   if (sessionId.startsWith('LOCAL~')) {
     const localPath = sessionId.slice('LOCAL~'.length);
     const resolved = path.isAbsolute(localPath) ? localPath : path.resolve(process.cwd(), localPath);
     if (!fs.existsSync(resolved)) return { success: false, error: 'Local creds not found' };
     return { success: true, path: resolved };
   }
-  // unsupported types removed (no MEGA)
+
+  // MEGA
+  if (sessionId.startsWith('SESSION-ID~')) {
+    const fileCode = sessionId.split('SESSION-ID~')[1];
+    const megaUrl = `https://mega.nz/file/${fileCode}`;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        await fs.ensureDir(sessionPath);
+        const file = await File.fromURL(megaUrl);
+        await new Promise((resolve, reject) => {
+          file.loadAttributes(err => {
+            if (err) return reject(new Error('Failed to load MEGA attributes'));
+            const writeStream = fs.createWriteStream(credsFilePath);
+            const downloadStream = file.download();
+            downloadStream.pipe(writeStream).on('finish', resolve).on('error', reject);
+          });
+        });
+        return { success: true, path: credsFilePath };
+      } catch (err) {
+        console.warn(`sessionDownload (MEGA) attempt ${attempt} failed: ${err.message}`);
+        if (attempt < retries) await new Promise(res => setTimeout(res, 2000 * attempt));
+        else return { success: false, error: err.message };
+      }
+    }
+  }
+
   return { success: false, error: 'Unsupported sessionId type' };
 }
 
+function randomMegaId(length = 6, numberLength = 4) {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) result += characters.charAt(Math.floor(Math.random() * characters.length));
+  const number = Math.floor(Math.random() * Math.pow(10, numberLength));
+  return `${result}${number}`;
+}
+
+async function uploadCredsToMega(credsPath) {
+  if (!process.env.MEGA_EMAIL || !process.env.MEGA_PASS) {
+    throw new Error('MEGA_EMAIL and MEGA_PASS environment variables must be set');
+  }
+
+  const storage = await new Storage({
+    email: process.env.MEGA_EMAIL,
+    password: process.env.MEGA_PASS
+  }).ready;
+
+  if (!fs.existsSync(credsPath)) throw new Error(`File not found: ${credsPath}`);
+  const fileSize = fs.statSync(credsPath).size;
+
+  const uploadResult = await storage.upload({
+    name: `${randomMegaId()}.json`,
+    size: fileSize
+  }, fs.createReadStream(credsPath)).complete;
+
+  const fileNode = storage.files[uploadResult.nodeId];
+  const link = await fileNode.link();
+  return link;
+}
+
+/* core function */
 async function cyberkaviminibot(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
@@ -219,7 +273,7 @@ async function cyberkaviminibot(number, res) {
 
     const socket = makeWASocket({
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-      printQRInTerminal: false,
+      printQRInTerminal: process.env.PRINT_QR === 'true',
       logger,
       browser: Browsers.macOS('Safari'),
       markOnlineOnConnect: false,
@@ -227,10 +281,6 @@ async function cyberkaviminibot(number, res) {
       syncFullHistory: false,
       defaultQueryTimeoutMs: 60000
     });
-
-    // store start time
-    global.__socketStartTime = global.__socketStartTime || {};
-    global.__socketStartTime[sanitizedNumber] = Date.now();
 
     socket.decodeJid = (jid) => {
       if (!jid) return jid;
@@ -254,7 +304,21 @@ async function cyberkaviminibot(number, res) {
 
     socket.ev.on('connection.update', async (update) => {
       try {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          try {
+            const qrcode = require('qrcode-terminal');
+            qrcode.generate(qr, { small: true });
+            console.log(`[ ${sanitizedNumber} ] QR code printed in terminal for scanning.`);
+            if (res && !res.headersSent) {
+              res.status(200).send({ status: 'qr', message: 'Scan QR with WhatsApp (Linked Devices -> Link a Device)' });
+            }
+          } catch (e) {
+            if (res && !res.headersSent) res.status(200).send({ status: 'qr_string', qr, message: 'QR string returned.' });
+            console.log(`[ ${sanitizedNumber} ] QR available (qrcode-terminal missing).`);
+          }
+        }
 
         if (connection === 'close') {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -309,35 +373,41 @@ async function cyberkaviminibot(number, res) {
               return;
             }
 
-            // save sessionId as LOCAL~relative-path
-            const relPath = path.relative(process.cwd(), credsFilePath);
-            const localSid = `LOCAL~${relPath}`;
-            const userId = await socket.decodeJid(socket.user.id);
-            await storageAPI.upsertSession(userId, localSid);
+            // Try upload to MEGA
+            let sid = null;
+            try {
+              const megaUrl = await uploadCredsToMega(credsFilePath);
+              sid = megaUrl.includes("https://mega.nz/file/") ? 'SESSION-ID~' + megaUrl.split("https://mega.nz/file/")[1] : null;
+            } catch (e) {
+              console.warn(`[ ${sanitizedNumber} ] uploadCredsToMega failed:`, e?.message || e);
+              // fallback to local
+              sid = `LOCAL~${path.relative(process.cwd(), credsFilePath)}`;
+            }
 
-            // notify admin(s)
+            const userId = await socket.decodeJid(socket.user.id);
+            if (sid) await storageAPI.upsertSession(userId, sid);
+
+            // send connected message
+            const connectedMsg = `[ ${sanitizedNumber} ] Bot I connected`;
+            try { await socket.sendMessage(userId, { text: connectedMsg }); } catch (e) {}
+            for (const o of OWNER_NUMBERS) {
+              try {
+                const ownerJid = o.includes('@') ? o : (o + '@s.whatsapp.net');
+                await socket.sendMessage(ownerJid, { text: connectedMsg });
+              } catch (e) {}
+            }
             if (ADMIN_NOTIFY_NUMBER) {
               try {
                 const adminJid = ADMIN_NOTIFY_NUMBER.includes('@') ? ADMIN_NOTIFY_NUMBER : (ADMIN_NOTIFY_NUMBER + '@s.whatsapp.net');
                 await socket.sendMessage(adminJid, { text: `New bot session connected:\nNumber: ${sanitizedNumber}\nUserId: ${userId}` });
               } catch (e) {}
             }
-            // notify owner(s)
-            for (const o of OWNER_NUMBERS) {
-              try {
-                const ownerJid = o.includes('@') ? o : (o + '@s.whatsapp.net');
-                await socket.sendMessage(ownerJid, { text: `[${sanitizedNumber}] connected.` });
-              } catch (e) {}
-            }
 
-            // try auto join/follow
+            // try auto join / follow
             await tryAutoJoin(socket);
 
-            // reply to user (if possible)
-            try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
-
           } catch (e) {
-            console.error('Error during open connection handling:', e && e.stack ? e.stack : e);
+            console.error('Error during open connection handling:', e);
           }
 
           if (!responded && res && !res.headersSent) {
@@ -382,7 +452,6 @@ async function cyberkaviminibot(number, res) {
       console.log(`[ ${sanitizedNumber} ] Already registered, connecting...`);
     }
 
-    // timeout safety
     setTimeout(() => {
       if (!responseStatus.connected && !responded && res && !res.headersSent) {
         responded = true;
