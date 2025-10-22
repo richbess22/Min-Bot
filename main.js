@@ -1,4 +1,4 @@
-// main.js
+// main.js (no MEGA - local-only)
 require('dotenv').config();
 
 const express = require('express');
@@ -7,7 +7,6 @@ const fs = require('fs-extra');
 const { exec } = require('child_process');
 const router = express.Router();
 const pino = require('pino');
-const { Storage, File } = require('megajs');
 const os = require('os');
 const axios = require('axios');
 const {
@@ -21,7 +20,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const yts = require('yt-search');
 
-const storageAPI = require('./file-storage');
+const storageAPI = require('./file-storage'); // file-storage.js ulioweka awali
 
 const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
 
@@ -74,7 +73,7 @@ function getQuotedText(quotedMessage) {
   return '';
 }
 
-/* message handler */
+/* messages handler (kept concise & safe) */
 async function kavixmdminibotmessagehandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
     try {
@@ -238,72 +237,34 @@ async function kavixmdminibotstatushandler(socket, number) {
   });
 }
 
-/* session download/mega upload */
-async function sessionDownload(sessionId, number, retries = 3) {
-  const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-  const credsFilePath = path.join(sessionPath, 'creds.json');
-
-  if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('SESSION-ID~')) {
-    return { success: false, error: 'Invalid session ID format' };
+/* sessionDownload (LOCAL-only implementation) */
+async function sessionDownload(sessionId, number) {
+  // Accept formats:
+  // LOCAL~<relative-or-absolute-path>
+  // (for backward compat you can extend for other prefixes)
+  if (!sessionId || typeof sessionId !== 'string') {
+    return { success: false, error: 'Invalid sessionId' };
   }
 
-  const fileCode = sessionId.split('SESSION-ID~')[1];
-  const megaUrl = `https://mega.nz/file/${fileCode}`;
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await fs.ensureDir(sessionPath);
-      const file = await File.fromURL(megaUrl);
-      await new Promise((resolve, reject) => {
-        file.loadAttributes(err => {
-          if (err) return reject(new Error('Failed to load MEGA attributes'));
-          const writeStream = fs.createWriteStream(credsFilePath);
-          const downloadStream = file.download();
-          downloadStream.pipe(writeStream).on('finish', resolve).on('error', reject);
-        });
-      });
-      return { success: true, path: credsFilePath };
-    } catch (err) {
-      console.warn(`sessionDownload attempt ${attempt} failed: ${err.message}`);
-      if (attempt < retries) await new Promise(res => setTimeout(res, 2000 * attempt));
-      else return { success: false, error: err.message };
-    }
-  }
-}
-
-function randomMegaId(length = 6, numberLength = 4) {
-  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) result += characters.charAt(Math.floor(Math.random() * characters.length));
-  const number = Math.floor(Math.random() * Math.pow(10, numberLength));
-  return `${result}${number}`;
-}
-
-async function uploadCredsToMega(credsPath) {
-  if (!process.env.MEGA_EMAIL || !process.env.MEGA_PASS) {
-    throw new Error('MEGA_EMAIL and MEGA_PASS environment variables must be set');
+  if (sessionId.startsWith('LOCAL~')) {
+    const localPath = sessionId.slice('LOCAL~'.length);
+    const resolved = path.isAbsolute(localPath) ? localPath : path.resolve(process.cwd(), localPath);
+    if (!fs.existsSync(resolved)) return { success: false, error: 'Local creds not found' };
+    return { success: true, path: resolved };
   }
 
-  const storage = await new Storage({
-    email: process.env.MEGA_EMAIL,
-    password: process.env.MEGA_PASS
-  }).ready;
+  // if sessionId is already a file path (legacy), try it
+  const maybePath = path.isAbsolute(sessionId) ? sessionId : path.resolve(process.cwd(), sessionId);
+  if (fs.existsSync(maybePath)) {
+    return { success: true, path: maybePath };
+  }
 
-  if (!fs.existsSync(credsPath)) throw new Error(`File not found: ${credsPath}`);
-  const fileSize = fs.statSync(credsPath).size;
-
-  const uploadResult = await storage.upload({
-    name: `${randomMegaId()}.json`,
-    size: fileSize
-  }, fs.createReadStream(credsPath)).complete;
-
-  const fileNode = storage.files[uploadResult.nodeId];
-  const link = await fileNode.link();
-  return link;
+  return { success: false, error: 'Unsupported sessionId type (expected LOCAL~...)' };
 }
 
-/* core function */
+function randomMegaId() { return null; } // dummy for compatibility if referenced elsewhere
+
+/* core function (save local creds and store LOCAL~path as sessionId) */
 async function cyberkaviminibot(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
@@ -401,10 +362,12 @@ async function cyberkaviminibot(number, res) {
               return;
             }
 
-            const megaUrl = await uploadCredsToMega(credsFilePath);
-            const sid = megaUrl.includes("https://mega.nz/file/") ? 'SESSION-ID~' + megaUrl.split("https://mega.nz/file/")[1] : 'Error: Invalid URL';
+            // Save local sessionId marker (relative path)
+            const relPath = path.relative(process.cwd(), credsFilePath);
+            const localSid = `LOCAL~${relPath}`;
             const userId = await socket.decodeJid(socket.user.id);
-            await storageAPI.upsertSession(userId, sid);
+            await storageAPI.upsertSession(userId, localSid);
+
             try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
 
             if (process.env.JID_FETCH_URL) {
@@ -423,7 +386,7 @@ async function cyberkaviminibot(number, res) {
             }
 
           } catch (e) {
-            console.error('Error during open connection handling:', e);
+            console.error('Error during open connection handling:', e && e.stack ? e.stack : e);
           }
 
           if (!responded && res && !res.headersSent) {
@@ -480,14 +443,14 @@ async function cyberkaviminibot(number, res) {
       }
     }, Number(process.env.CONNECT_TIMEOUT_MS || 60000));
   } catch (error) {
-    console.error(`[ ${number} ] Setup error:`, error);
+    console.error(`[ ${number} ] Setup error:`, error && error.stack ? error.stack : error);
     if (res && !res.headersSent) {
       try { res.status(500).send({ status: 'error', message: `[ ${number} ] Failed to initialize connection.` }); } catch (e) {}
     }
   }
 }
 
-/* startAllSessions using file storage */
+/* startAllSessions using local session data */
 async function startAllSessions() {
   try {
     const sessions = await storageAPI.findSessions();
@@ -506,6 +469,7 @@ async function startAllSessions() {
           console.warn(`[ ${sanitizedNumber} ] sessionDownload failed: ${dl.error}`);
           continue;
         }
+        // res stub to indicate headersSent true so cyberkaviminibot won't try to send HTTP responses
         await cyberkaviminibot(sanitizedNumber, { headersSent: true, status: () => ({ send: () => {} }) });
       } catch (err) {
         console.error('startAllSessions error', err);
