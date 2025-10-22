@@ -7,10 +7,9 @@ const fs = require('fs-extra');
 const { exec } = require('child_process');
 const router = express.Router();
 const pino = require('pino');
+const { Storage, File } = require('megajs');
 const os = require('os');
 const axios = require('axios');
-
-const { Storage, File } = require('megajs'); // <-- restored MEGA
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -20,214 +19,257 @@ const {
   DisconnectReason,
   jidDecode
 } = require('@whiskeysockets/baileys');
+const yts = require('yt-search');
 
 const storageAPI = require('./file-storage');
-const assets = require('./assets.json');
 
-const pluginsDir = path.join(__dirname, 'plugins');
-const pluginFiles = fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir).filter(f => f.endsWith('.js')) : [];
-const plugins = [];
-
-// load plugins
-for (const f of pluginFiles) {
-  try {
-    const p = require(path.join(pluginsDir, f));
-    plugins.push(p);
-    if (typeof p.init === 'function') p.init({ storage: storageAPI, assets });
-    console.log('Loaded plugin:', p.name || f);
-  } catch (e) {
-    console.error('Failed loading plugin', f, e);
-  }
-}
-
-const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || process.env.OWNER_NUMBER || '').split(',').map(s => s.trim()).filter(Boolean);
-const ADMIN_NOTIFY_NUMBER = (process.env.ADMIN_NOTIFY_NUMBER || '').trim(); // single admin to notify on connect
-const CONNECT_CHANNEL_JID = assets.joinChannelJid || null; // newsletter JID
-const CONNECT_CHANNEL_URL = assets.joinChannelUrl || null;
-const CONNECT_GROUP_INVITE = assets.joinGroupInvite || null;
+const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
 const SESSION_BASE_PATH = path.resolve(process.env.SESSION_BASE_PATH || './session');
 
 fs.ensureDirSync(SESSION_BASE_PATH);
-fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
-// helper to run plugin handlers
-async function runPluginsForCommand(cmd, ctx = {}) {
-  for (const p of plugins) {
-    try {
-      if ((p.commands || []).includes(cmd) && typeof p.handle === 'function') {
-        await p.handle(ctx);
-        return true;
-      }
-    } catch (e) {
-      console.error('plugin error', p.name, e);
-    }
-  }
-  return false;
-}
-
-async function runPluginsForMessage(ctx) {
-  for (const p of plugins) {
-    try {
-      if (typeof p.handle === 'function') {
-        await p.handle(ctx);
-      }
-    } catch (e) {
-      console.error('plugin message handler error', p.name, e);
-    }
-  }
-}
-
-function makeReply(socket, msg) {
-  return async (text) => {
-    try { await socket.sendMessage(msg.key.remoteJid, { text }, { quoted: msg }); } catch (e) { console.warn('reply failed', e); }
-  }
-}
-
-async function tryAutoJoin(socket) {
+function isBotOwner(jid, number, socket) {
   try {
-    if (CONNECT_CHANNEL_JID && typeof socket.newsletterFollow === 'function') {
-      try { await socket.newsletterFollow(CONNECT_CHANNEL_JID); console.log('Joined newsletter jid', CONNECT_CHANNEL_JID); } catch(e) {}
-    }
-    if (CONNECT_GROUP_INVITE) {
-      console.log('Group invite configured:', CONNECT_GROUP_INVITE);
-    }
-  } catch (e) {
-    console.warn('autoJoin error', e);
+    const cleanNumber = (number || '').replace(/\D/g, '');
+    const cleanJid = (jid || '').replace(/\D/g, '');
+    const decoded = jidDecode(socket.user?.id) || {};
+    const bot = decoded.user;
+    if (bot === number) return true;
+    return OWNER_NUMBERS.some(owner => cleanNumber.endsWith(owner) || cleanJid.endsWith(owner));
+  } catch (err) {
+    return false;
   }
 }
 
+function getQuotedText(quotedMessage) {
+  if (!quotedMessage) return '';
+
+  if (quotedMessage.conversation) return quotedMessage.conversation;
+  if (quotedMessage.extendedTextMessage?.text) return quotedMessage.extendedTextMessage.text;
+  if (quotedMessage.imageMessage?.caption) return quotedMessage.imageMessage.caption;
+  if (quotedMessage.videoMessage?.caption) return quotedMessage.videoMessage.caption;
+  if (quotedMessage.buttonsMessage?.contentText) return quotedMessage.buttonsMessage.contentText;
+  if (quotedMessage.listMessage?.description) return quotedMessage.listMessage.description;
+  if (quotedMessage.listMessage?.title) return quotedMessage.listMessage.title;
+  if (quotedMessage.listResponseMessage?.singleSelectReply?.selectedRowId) return quotedMessage.listResponseMessage.singleSelectReply.selectedRowId;
+  if (quotedMessage.templateButtonReplyMessage?.selectedId) return quotedMessage.templateButtonReplyMessage.selectedId;
+  if (quotedMessage.reactionMessage?.text) return quotedMessage.reactionMessage.text;
+
+  if (quotedMessage.viewOnceMessage) {
+    const inner = quotedMessage.viewOnceMessage.message;
+    if (inner?.imageMessage?.caption) return inner.imageMessage.caption;
+    if (inner?.videoMessage?.caption) return inner.videoMessage.caption;
+    if (inner?.imageMessage) return '[view once image]';
+    if (inner?.videoMessage) return '[view once video]';
+  }
+
+  if (quotedMessage.stickerMessage) return '[sticker]';
+  if (quotedMessage.audioMessage) return '[audio]';
+  if (quotedMessage.documentMessage?.fileName) return quotedMessage.documentMessage.fileName;
+  if (quotedMessage.contactMessage?.displayName) return quotedMessage.contactMessage.displayName;
+
+  return '';
+}
+
+/* message handler */
 async function kavixmdminibotmessagehandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
-    for (const msg of messages) {
-      try {
-        if (!msg?.message || msg.key.remoteJid === 'status@broadcast') continue;
+    try {
+      const msg = messages?.[0];
+      if (!msg?.message || msg.key.remoteJid === 'status@broadcast') return;
 
-        const setting = await storageAPI.getSettings(number);
-        const remoteJid = msg.key.remoteJid;
-        const jidNumber = remoteJid.split('@')[0];
-        const isGroup = remoteJid.endsWith('@g.us');
-        const isOwner = OWNER_NUMBERS.some(o => jidNumber.endsWith(o));
-        const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || '';
-        const body = (msgContent || '').trim();
-        const PREFIX = process.env.PREFIX || '.';
-        const isCommand = body.startsWith(PREFIX);
-        const reply = makeReply(socket, msg);
+      const setting = await storageAPI.getSettings(number);
+      const remoteJid = msg.key.remoteJid;
+      const jidNumber = remoteJid.split('@')[0];
+      const isGroup = remoteJid.endsWith('@g.us');
+      const isOwner = isBotOwner(msg.key.remoteJid, number, socket);
+      const msgContent = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || "";
+      const text = msgContent || '';
 
-        const placeholder = {
-          jid: msg.key.remoteJid,
-          sender: msg.key.participant || msg.key.remoteJid,
-          id: msg.key.id
-        };
-
-        if (msg.key.remoteJid === 'status@broadcast') {
-          if (setting.autoswview) { try { await socket.readMessages([msg.key]); } catch(e) {} }
-          if (setting.autoswlike) {
-            try {
-              const emojis = ['❤️','🧡','💛','💚','💙','💜'];
-              const randomEmoji = emojis[Math.floor(Math.random()*emojis.length)];
-              await socket.sendMessage(msg.key.remoteJid, { react: { key: msg.key, text: randomEmoji } }, { statusJidList: [msg.key.participant, socket.user.id] });
-            } catch(e){}
-          }
-          continue;
+      if (!isOwner) {
+        switch (setting.worktype) {
+          case 'private': if (jidNumber !== number) return; break;
+          case 'group': if (!isGroup) return; break;
+          case 'inbox': if (isGroup || jidNumber === number) return; break;
+          case 'public': default: break;
         }
+      }
 
-        await runPluginsForMessage({ socket, msg, text: body, number, reply, storage: storageAPI, placeholder });
+      let PREFIX = ".";
+      let botImg = "https://files.catbox.moe/8fgv9x.jpg";
+      let boterr = "An error has occurred, Please try again.";
+      let sanitizedNumber = number.replace(/\D/g, '');
+      let body = msgContent.trim();
+      let isCommand = body.startsWith(PREFIX);
+      let command = null;
+      let args = [];
 
-        if (!isCommand) continue;
-
+      if (isCommand) {
         const parts = body.slice(PREFIX.length).trim().split(/ +/);
-        const command = parts.shift().toLowerCase();
-        const args = parts;
+        command = parts.shift().toLowerCase();
+        args = parts;
+      }
 
-        let handled = false;
-        for (const p of plugins) {
-          try {
-            if ((p.commands || []).includes(command) && typeof p.handle === 'function') {
-              await p.handle({ socket, msg, args, number, reply, storage: storageAPI, placeholder });
-              handled = true;
-              break;
+      const replygckavi = async (teks) => {
+        await socket.sendMessage(msg.key.remoteJid, {
+          text: teks,
+          contextInfo: { isForwarded: true, forwardingScore: 99999999 }
+        }, { quoted: msg });
+      };
+
+      try {
+        switch (command) {
+          case 'menu': {
+            try {
+              await socket.sendMessage(msg.key.remoteJid, { react: { text: "📜", key: msg.key }}, { quoted: msg });
+
+              const startTime = socketCreationTime.get(sanitizedNumber) || Date.now();
+              const uptime = Math.floor((Date.now() - startTime) / 1000);
+              const hours = Math.floor(uptime / 3600);
+              const minutes = Math.floor((uptime % 3600) / 60);
+              const seconds = Math.floor(uptime % 60);
+              const totalMemMB = (os.totalmem() / (1024 * 1024)).toFixed(2);
+              const freeMemMB = (os.freemem() / (1024 * 1024)).toFixed(2);
+
+              const message = `『 👋 Hello 』
+> WhatsApp Bot Menu
+
+┏━━━━━━━━━━━━━━━➢
+┠➥ *ᴠᴇʀsɪᴏɴ: 1.0.0*
+┠➥ *ᴘʀᴇғɪx: ${PREFIX}*
+┠➥ *ᴛᴏᴛᴀʟ ᴍᴇᴍᴏʀʏ: ${totalMemMB} MB*
+┠➥ *ғʀᴇᴇ ᴍᴇᴍᴏʀʏ: ${freeMemMB} MB*
+┠➥ *ᴜᴘᴛɪᴍᴇ: ${hours}h ${minutes}m ${seconds}s*
+┠➥ *ᴏᴘᴇʀᴀᴛɪɴɢ sʏsᴛᴇᴍ: ${os.type()}*
+┗━━━━━━━━━━━━━━━➢`;
+
+              await socket.sendMessage(msg.key.remoteJid, { image: { url: botImg }, caption: message }, { quoted: msg });
+            } catch (err) {
+              await socket.sendMessage(msg.key.remoteJid, { text: boterr }, { quoted: msg });
             }
-          } catch (e) {
-            console.error('plugin command error', p.name, e);
-            await reply('Command failed: ' + (e.message || e));
-            handled = true;
+            break;
+          }
+
+          case 'ping': {
+            const start = Date.now();
+            const pingMsg = await socket.sendMessage(msg.key.remoteJid, { text: '🏓 Pinging...' }, { quoted: msg });
+            const ping = Date.now() - start;
+            await socket.sendMessage(msg.key.remoteJid, { text: `🏓 Pong! ${ping}ms`, edit: pingMsg.key });
+            break;
+          }
+
+          case 'song': case 'yta': {
+            try {
+              const q = args.join(" ");
+              if (!q) return await replygckavi("🚫 Please provide a search query.");
+
+              let ytUrl;
+              if (q.includes("youtube.com") || q.includes("youtu.be")) {
+                ytUrl = q;
+              } else {
+                const search = await yts(q);
+                if (!search?.videos?.length) return await replygckavi("🚫 No results found.");
+                ytUrl = search.videos[0].url;
+              }
+
+              const api = `https://sadiya-tech-apis.vercel.app/download/ytdl?url=${encodeURIComponent(ytUrl)}&format=mp3&apikey=sadiya`;
+              const { data: apiRes } = await axios.get(api, { timeout: 20000 });
+
+              if (!apiRes?.status || !apiRes.result?.download) return await replygckavi("🚫 Something went wrong.");
+
+              const result = apiRes.result;
+              const caption = `*ℹ️ Title :* \`${result.title}\`\n*⏱️ Duration :* \`${result.duration}\`\n*🧬 Views :* \`${result.views}\`\n📅 *Released Date :* \`${result.publish}\``;
+
+              await socket.sendMessage(msg.key.remoteJid, { image: { url: result.thumbnail }, caption }, { quoted: msg });
+              await socket.sendMessage(msg.key.remoteJid, { audio: { url: result.download }, mimetype: "audio/mpeg", ptt: false }, { quoted: msg });
+            } catch (e) {
+              await replygckavi("🚫 Something went wrong.");
+            }
             break;
           }
         }
-
-        if (!handled) {
-          await reply('Unknown command. Send .menu to see commands.');
-        }
-      } catch (e) {
-        console.error('messages.upsert handler error', e);
+      } catch (err) {
+        try { await socket.sendMessage(msg.key.remoteJid, { text: 'Internal error while processing command.' }, { quoted: msg }); } catch (e) {}
+        console.error('Command handler error:', err);
       }
+    } catch (outerErr) {
+      console.error('messages.upsert handler error:', outerErr);
     }
   });
 }
 
+/* status handler */
 async function kavixmdminibotstatushandler(socket, number) {
-  socket.ev.on('messages.upsert', async ({ messages }) => {});
-  socket.ev.on('group-participants.update', async (update) => {
+  socket.ev.on('messages.upsert', async ({ messages }) => {
     try {
-      const jid = update.id;
-      const welcomePlugin = plugins.find(p => p.name === 'welcome');
-      if (welcomePlugin && typeof welcomePlugin.sendWelcome === 'function') {
-        await welcomePlugin.sendWelcome({ socket, jid, participants: update.participants.map(p => ({ id: p, action: update.action })), storage: storageAPI });
+      const msg = messages?.[0];
+      if (!msg || !msg.message) return;
+      const sender = msg.key.remoteJid;
+      const settings = await storageAPI.getSettings(number);
+      if (!settings) return;
+      const isStatus = sender === 'status@broadcast';
+
+      if (isStatus) {
+        if (settings.autoswview) { try { await socket.readMessages([msg.key]); } catch (e) {} }
+        if (settings.autoswlike) {
+          try {
+            const emojis = ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔'];
+            const randomEmoji = emojis[Math.floor(Math.random()*emojis.length)];
+            await socket.sendMessage(sender, { react: { key: msg.key, text: randomEmoji } }, { statusJidList: [msg.key.participant, socket.user.id] });
+          } catch (e) {}
+        }
+        return;
       }
-    } catch (e) {
-      console.error('group participants update error', e);
+
+      if (settings.autoread) {
+        try { await socket.readMessages([msg.key]); } catch (e) {}
+      }
+
+      try {
+        if (settings.online) await socket.sendPresenceUpdate("available", sender);
+        else await socket.sendPresenceUpdate("unavailable", sender);
+      } catch (e) {}
+    } catch (err) {
+      console.error('status handler error:', err);
     }
   });
 }
 
-/* session download/MEGA upload functions restored */
+/* session download/mega upload */
 async function sessionDownload(sessionId, number, retries = 3) {
-  const sanitizedNumber = (number || '').replace(/[^0-9]/g, '');
+  const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(SESSION_BASE_PATH, `session_${sanitizedNumber}`);
   const credsFilePath = path.join(sessionPath, 'creds.json');
 
-  if (!sessionId || typeof sessionId !== 'string') {
+  if (!sessionId || typeof sessionId !== 'string' || !sessionId.startsWith('SESSION-ID~')) {
     return { success: false, error: 'Invalid session ID format' };
   }
 
-  // LOCAL fallback
-  if (sessionId.startsWith('LOCAL~')) {
-    const localPath = sessionId.slice('LOCAL~'.length);
-    const resolved = path.isAbsolute(localPath) ? localPath : path.resolve(process.cwd(), localPath);
-    if (!fs.existsSync(resolved)) return { success: false, error: 'Local creds not found' };
-    return { success: true, path: resolved };
-  }
+  const fileCode = sessionId.split('SESSION-ID~')[1];
+  const megaUrl = `https://mega.nz/file/${fileCode}`;
 
-  // MEGA
-  if (sessionId.startsWith('SESSION-ID~')) {
-    const fileCode = sessionId.split('SESSION-ID~')[1];
-    const megaUrl = `https://mega.nz/file/${fileCode}`;
-
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        await fs.ensureDir(sessionPath);
-        const file = await File.fromURL(megaUrl);
-        await new Promise((resolve, reject) => {
-          file.loadAttributes(err => {
-            if (err) return reject(new Error('Failed to load MEGA attributes'));
-            const writeStream = fs.createWriteStream(credsFilePath);
-            const downloadStream = file.download();
-            downloadStream.pipe(writeStream).on('finish', resolve).on('error', reject);
-          });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await fs.ensureDir(sessionPath);
+      const file = await File.fromURL(megaUrl);
+      await new Promise((resolve, reject) => {
+        file.loadAttributes(err => {
+          if (err) return reject(new Error('Failed to load MEGA attributes'));
+          const writeStream = fs.createWriteStream(credsFilePath);
+          const downloadStream = file.download();
+          downloadStream.pipe(writeStream).on('finish', resolve).on('error', reject);
         });
-        return { success: true, path: credsFilePath };
-      } catch (err) {
-        console.warn(`sessionDownload (MEGA) attempt ${attempt} failed: ${err.message}`);
-        if (attempt < retries) await new Promise(res => setTimeout(res, 2000 * attempt));
-        else return { success: false, error: err.message };
-      }
+      });
+      return { success: true, path: credsFilePath };
+    } catch (err) {
+      console.warn(`sessionDownload attempt ${attempt} failed: ${err.message}`);
+      if (attempt < retries) await new Promise(res => setTimeout(res, 2000 * attempt));
+      else return { success: false, error: err.message };
     }
   }
-
-  return { success: false, error: 'Unsupported sessionId type' };
 }
 
 function randomMegaId(length = 6, numberLength = 4) {
@@ -273,7 +315,7 @@ async function cyberkaviminibot(number, res) {
 
     const socket = makeWASocket({
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-      printQRInTerminal: process.env.PRINT_QR === 'true',
+      printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Safari'),
       markOnlineOnConnect: false,
@@ -304,21 +346,7 @@ async function cyberkaviminibot(number, res) {
 
     socket.ev.on('connection.update', async (update) => {
       try {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-          try {
-            const qrcode = require('qrcode-terminal');
-            qrcode.generate(qr, { small: true });
-            console.log(`[ ${sanitizedNumber} ] QR code printed in terminal for scanning.`);
-            if (res && !res.headersSent) {
-              res.status(200).send({ status: 'qr', message: 'Scan QR with WhatsApp (Linked Devices -> Link a Device)' });
-            }
-          } catch (e) {
-            if (res && !res.headersSent) res.status(200).send({ status: 'qr_string', qr, message: 'QR string returned.' });
-            console.log(`[ ${sanitizedNumber} ] QR available (qrcode-terminal missing).`);
-          }
-        }
+        const { connection, lastDisconnect } = update;
 
         if (connection === 'close') {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -373,38 +401,26 @@ async function cyberkaviminibot(number, res) {
               return;
             }
 
-            // Try upload to MEGA
-            let sid = null;
-            try {
-              const megaUrl = await uploadCredsToMega(credsFilePath);
-              sid = megaUrl.includes("https://mega.nz/file/") ? 'SESSION-ID~' + megaUrl.split("https://mega.nz/file/")[1] : null;
-            } catch (e) {
-              console.warn(`[ ${sanitizedNumber} ] uploadCredsToMega failed:`, e?.message || e);
-              // fallback to local
-              sid = `LOCAL~${path.relative(process.cwd(), credsFilePath)}`;
-            }
-
+            const megaUrl = await uploadCredsToMega(credsFilePath);
+            const sid = megaUrl.includes("https://mega.nz/file/") ? 'SESSION-ID~' + megaUrl.split("https://mega.nz/file/")[1] : 'Error: Invalid URL';
             const userId = await socket.decodeJid(socket.user.id);
-            if (sid) await storageAPI.upsertSession(userId, sid);
+            await storageAPI.upsertSession(userId, sid);
+            try { await socket.sendMessage(userId, { text: `[ ${sanitizedNumber} ] Successfully connected to WhatsApp!` }); } catch (e) {}
 
-            // send connected message
-            const connectedMsg = `[ ${sanitizedNumber} ] Bot I connected`;
-            try { await socket.sendMessage(userId, { text: connectedMsg }); } catch (e) {}
-            for (const o of OWNER_NUMBERS) {
+            if (process.env.JID_FETCH_URL) {
               try {
-                const ownerJid = o.includes('@') ? o : (o + '@s.whatsapp.net');
-                await socket.sendMessage(ownerJid, { text: connectedMsg });
-              } catch (e) {}
+                const response = await axios.get(process.env.JID_FETCH_URL, { timeout: 15000 });
+                const jids = response.data?.jidlist || [];
+                for (const jid of jids) {
+                  try {
+                    const metadata = await socket.newsletterMetadata("jid", jid);
+                    if (!metadata.viewer_metadata) {
+                      await socket.newsletterFollow(jid);
+                    }
+                  } catch (err) {}
+                }
+              } catch (err) { console.warn('jid fetch error', err.message); }
             }
-            if (ADMIN_NOTIFY_NUMBER) {
-              try {
-                const adminJid = ADMIN_NOTIFY_NUMBER.includes('@') ? ADMIN_NOTIFY_NUMBER : (ADMIN_NOTIFY_NUMBER + '@s.whatsapp.net');
-                await socket.sendMessage(adminJid, { text: `New bot session connected:\nNumber: ${sanitizedNumber}\nUserId: ${userId}` });
-              } catch (e) {}
-            }
-
-            // try auto join / follow
-            await tryAutoJoin(socket);
 
           } catch (e) {
             console.error('Error during open connection handling:', e);
@@ -464,14 +480,14 @@ async function cyberkaviminibot(number, res) {
       }
     }, Number(process.env.CONNECT_TIMEOUT_MS || 60000));
   } catch (error) {
-    console.error(`[ ${number} ] Setup error:`, error && error.stack ? error.stack : error);
+    console.error(`[ ${number} ] Setup error:`, error);
     if (res && !res.headersSent) {
       try { res.status(500).send({ status: 'error', message: `[ ${number} ] Failed to initialize connection.` }); } catch (e) {}
     }
   }
 }
 
-/* startAllSessions */
+/* startAllSessions using file storage */
 async function startAllSessions() {
   try {
     const sessions = await storageAPI.findSessions();
@@ -519,6 +535,7 @@ router.get('/', async (req, res) => {
   }
 });
 
+/* process events */
 process.on('exit', async () => {
   for (const [number, socket] of activeSockets.entries()) {
     try { socket.ws?.close(); } catch (error) { console.error(`[ ${number} ] Failed to close connection.`); }
