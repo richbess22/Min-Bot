@@ -14,7 +14,7 @@ module.exports = {
     const hours = Math.floor(uptimeS/3600), minutes = Math.floor((uptimeS%3600)/60), seconds = uptimeS%60;
 
     const message = `『 👋 Hello 』
-> WhatsApp Bot Menu
+> *𝚂𝙸𝙻𝙰 𝙼𝙳* Menu
 
 ┏━━━━━━━━━━━━━━━➢
 ┠➥ *ᴠᴇʀsɪᴏɴ: 1.0.0*
