@@ -14,7 +14,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.8",
+    "@whiskeysockets/baileys": "^6.17.16",
     "axios": "^1.7.4",
     "chalk": "^5.3.0",
     "dotenv": "^16.4.5",
@@ -24,8 +24,10 @@
     "moment-timezone": "^0.5.46",
     "node-fetch": "^3.3.2",
     "pino": "^9.3.0",
-    "ytsr": "3.8.4",
-    "ytdl-core": "^4.11.5"
+    "ytdl-core": "^4.11.5",
+    "yt-search": "^2.10.4",
+    "megajs": "^7.0.3",
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
