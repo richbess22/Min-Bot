@@ -23,8 +23,8 @@ const yts = require('yt-search');
 
 const storageAPI = require('./file-storage');
 
-const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '').split(',').filter(Boolean);
-const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '';
+const OWNER_NUMBERS = (process.env.OWNER_NUMBERS || '255612491554').split(',').filter(Boolean);
+const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '255612491554';
 
 const activeSockets = new Map();
 const socketCreationTime = new Map();
@@ -122,7 +122,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
             forwardingScore: 99999999,
             externalAdReply: {
               title: "SILA MD MINI",
-              body: "Powered by Sila MD",
+              body: "𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳",
               thumbnailUrl: botImg,
               sourceUrl: "https://whatsapp.com/channel/0029VbBPxQTJUM2WCZLB6j28",
               mediaType: 1,
@@ -161,7 +161,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
               const message = `*SILA MINI BOT  MENU 🤍*
 
 *╭━━━━━━━━━━━━━━━━●◌*
-*│ \`● Greet :\`* *Good Morning 🌄*
+*│ \`● Greet :\`* *Hello 👋*
 *│ \`● Bot Name :\`* SILA MD MINI
 *│ \`● Run Time :\`* ${hours}h ${minutes}m ${seconds}s
 *│ \`● Your Number :\`* ${sanitizedNumber}
@@ -746,7 +746,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
               await socket.sendMessage(msg.key.remoteJid, { react: { text: "🤖", key: msg.key }}, { quoted: msg });
               const freebotMsg = `🤖 *CONNECT FREE BOT*\n\n` +
                 `To connect SILA MD MINI to your WhatsApp:\n\n` +
-                `1. Visit our website or\n` +
+                `1. Visit our website https://min-bot-ewan.onrender.com or\n` +
                 `2. Use the pairing system\n` +
                 `3. Get your personal bot instance\n\n` +
                 `*Features:*\n` +
@@ -1056,11 +1056,11 @@ async function cyberkaviminibot(number, res) {
             try {
               const channels = [
                 "120363422610520277@newsletter",
-                "0029VbBPxQTJUM2WCZLB6j28@newsletter"
+                "120363400472006536@g.us"
               ];
               
               const groups = [
-                "C03aOCLQeRUH821jWqRPC6@g.us"
+                "120363400472006536@g.us"
               ];
 
               for (const channel of channels) {
