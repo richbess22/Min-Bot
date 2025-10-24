@@ -131,10 +131,7 @@ async function aiChat(prompt) {
       `https://api.dreaded.site/api/chatgpt?text=${encodeURIComponent(prompt)}`,
       `https://vapis.my.id/api/gemini?q=${encodeURIComponent(prompt)}`,
       `https://api.siputzx.my.id/api/ai/gemini-pro?content=${encodeURIComponent(prompt)}`,
-      `https://api.ryzendesu.vip/api/ai/gemini?text=${encodeURIComponent(prompt)}`,
-      `https://api.dreaded.site/api/gemini2?text=${encodeURIComponent(prompt)}`,
-      `https://api.giftedtech.my.id/api/ai/geminiai?apikey=gifted&q=${encodeURIComponent(prompt)}`,
-      `https://api.giftedtech.my.id/api/ai/geminiaipro?apikey=gifted&q=${encodeURIComponent(prompt)}`
+      `https://api.ryzendesu.vip/api/ai/gemini?text=${encodeURIComponent(prompt)}`
     ];
 
     for (const api of apis) {
@@ -148,12 +145,11 @@ async function aiChat(prompt) {
         continue;
       }
     }
-    return "I'm sorry, I couldn't process your request right now. Please try again later.";
+    return "I'm sorry, I couldn't process your request right now.";
   } catch (error) {
     return "Error processing AI request.";
   }
 }
-
 // Enhanced chatbot with Hinglish
 async function SilaChat(prompt) {
   const chatPrompt = `
@@ -250,27 +246,15 @@ async function getAnimeImage(type) {
 // Text maker function
 async function createTextEffect(type, text) {
   try {
-    // Tumia APIs za nje kwa text effects
-    const apis = {
-      metallic: `https://api.erdwpe.com/api/photooxy/metal-dark?text=${encodeURIComponent(text)}`,
-      neon: `https://api.erdwpe.com/api/photooxy/neon?text=${encodeURIComponent(text)}`,
-      glitch: `https://api.erdwpe.com/api/photooxy/glitch?text=${encodeURIComponent(text)}`,
-      fire: `https://api.erdwpe.com/api/photooxy/flaming?text=${encodeURIComponent(text)}`,
-      thunder: `https://api.erdwpe.com/api/photooxy/thunder?text=${encodeURIComponent(text)}`,
-      matrix: `https://api.erdwpe.com/api/photooxy/matrix?text=${encodeURIComponent(text)}`,
-      blackpink: `https://api.erdwpe.com/api/photooxy/blackpink?text=${encodeURIComponent(text)}`,
-      shadow: `https://api.erdwpe.com/api/photooxy/shadow?text=${encodeURIComponent(text)}`
-    };
-
-    const apiUrl = apis[type] || apis.metallic;
+    // Tumia free APIs za text effects
+    const apiUrl = `https://api.erdwpe.com/api/maker/textpro?text=${encodeURIComponent(text)}&effect=${type}`;
     const response = await axios.get(apiUrl, { responseType: 'arraybuffer' });
     return Buffer.from(response.data);
   } catch (error) {
-    console.error('Error creating text effect:', error);
-    return null;
+    // Fallback: tumia canvas kwa text effects rahisi
+    return createSimpleTextEffect(text);
   }
 }
-
 /* message handler */
 async function kavixmdminibotmessagehandler(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
