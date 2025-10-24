@@ -608,35 +608,6 @@ async function kavixmdminibotstatushandler(socket, number) {
         
         return;
       }
-      
-      // Auto read messages
-      if (settings.autoread) {
-        try { await socket.readMessages([msg.key]); } catch (e) {}
-      }
-      
-      // Auto typing indicator
-      if (AUTO_FEATURES.AUTO_TYPING) {
-        try {
-          await socket.sendPresenceUpdate('composing', sender);
-          await delay(2000);
-          await socket.sendPresenceUpdate('paused', sender);
-        } catch (e) {}
-      }
-          
-       // Auto reply to status
-        if (AUTO_FEATURES.AUTO_REPLY_STATUS) {
-          try {
-            const statusText = msg.message?.conversation || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || '';
-            if (statusText) {
-              const aiResponse = await aiChat(`Analyze this status and give a meaningful response: "${statusText}"`);
-              await socket.sendMessage(sender, { 
-                text: `📢 Status Reply:\n${aiResponse}\n\n_Seen by SILA MD MINI_` 
-              });
-            }
-          } catch (e) {}
-        }
-        return;
-      }
 
       // Auto read messages
       if (settings.autoread) {
