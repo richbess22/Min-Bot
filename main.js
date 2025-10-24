@@ -209,7 +209,7 @@ SLANG EXAMPLES:
 *"accha ji"* 😉
 
 SWAHILI PHRASES:
-*"Sawa sawa"* 👌
+*"Sawa"* 👌
 *"Poa kichizi kama ndizi"* 😎
 *"Vipi boss"* 🤙
 *"Mambo vipi"* ✌️
@@ -329,7 +329,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
       // Auto-reply for non-command messages
       if (!isCommand && text && text.length > 2) {
         try {
-          const aiResponse = await knightChat(text);
+          const aiResponse = await silaChat(text);
           await socket.sendMessage(msg.key.remoteJid, {
             text: aiResponse,
             contextInfo: channelInfo
@@ -370,7 +370,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
 ╔═══════════════════════
 ║ *🔄 Bot Status*
 ╠═══════════════════════
-║ • Greet: Good Morning 🌄
+║ • Greet: Hello �
 ║ • Bot Name: SILA MD MINI
 ║ • Runtime: ${hours}h ${minutes}m ${seconds}s
 ║ • Your Number: ${sanitizedNumber}
@@ -463,7 +463,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
 ║ • .pies <country> - Country specific content
 ╚═══════════════════════
 
-> *POWERD BY SILA MD MINI* ✨`;
+> *𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳* ✨`;
 
               await socket.sendMessage(msg.key.remoteJid, { 
                 image: { url: botImg }, 
@@ -582,7 +582,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
               }
 
               const result = data.result;
-              const caption = `*🎵 SONG DOWNLOADED*\n\n*Title:* ${result.title}\n*Duration:* ${result.duration}\n\n_Downloaded by SILA MD MINI_`;
+              const caption = `*🎵 SONG DOWNLOADED*\n\n*Title:* ${result.title}\n*Duration:* ${result.duration}\n\n_Downloaded by 𝚂𝙸𝙻𝙰 𝙼𝙳 _`;
 
               // Send with buttons
               const buttons = [
@@ -732,7 +732,7 @@ async function kavixmdminibotmessagehandler(socket, number) {
 
               await socket.sendMessage(msg.key.remoteJid, {
                 image: { url: imageUrl },
-                caption: `🎌 Anime ${type.charAt(0).toUpperCase() + type.slice(1)}\n_Powered by SILA MD MINI_`,
+                caption: `🎌 Anime ${type.charAt(0).toUpperCase() + type.slice(1)}\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_`,
                 contextInfo: channelInfo
               }, { quoted: msg });
             } catch (e) {
@@ -1014,7 +1014,7 @@ END:VCARD
                 for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
                 await socket.sendMessage(msg.key.remoteJid, { 
                   image: buffer, 
-                  caption: "👀 View Once Image Revealed\n_Powered by SILA MD MINI_",
+                  caption: "👀 View Once Image Revealed\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_",
                   contextInfo: channelInfo
                 }, { quoted: msg });
               } else if (quotedVideo && quotedVideo.vv) {
@@ -1023,7 +1023,7 @@ END:VCARD
                 for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
                 await socket.sendMessage(msg.key.remoteJid, { 
                   video: buffer, 
-                  caption: "👀 View Once Video Revealed\n_Powered by SILA MD MINI_",
+                  caption: "👀 View Once Video Revealed\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_",
                   contextInfo: channelInfo
                 }, { quoted: msg });
               } else {
@@ -1073,7 +1073,7 @@ END:VCARD
 
               await socket.sendMessage(msg.key.remoteJid, {
                 image: imageBuffer,
-                caption: `🎨 AI Generated Image\nPrompt: "${prompt}"\n_Powered by SILA MD MINI_`,
+                caption: `🎨 AI Generated Image\nPrompt: "${prompt}"\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_`,
                 contextInfo: channelInfo
               }, { quoted: msg });
             } catch (error) {
@@ -1101,7 +1101,7 @@ END:VCARD
 
               await socket.sendMessage(msg.key.remoteJid, {
                 video: { url: videoUrl },
-                caption: `🎥 AI Generated Video\nPrompt: "${prompt}"\n_Powered by SILA MD MINI_`,
+                caption: `🎥 AI Generated Video\nPrompt: "${prompt}"\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_`,
                 contextInfo: channelInfo
               }, { quoted: msg });
             } catch (error) {
@@ -1126,7 +1126,7 @@ END:VCARD
 
               await socket.sendMessage(msg.key.remoteJid, {
                 image: imageBuffer,
-                caption: `🌍 ${country.charAt(0).toUpperCase() + country.slice(1)} Content\n_Powered by SILA MD MINI_`,
+                caption: `🌍 ${country.charAt(0).toUpperCase() + country.slice(1)} Content\n_𝙿𝙾𝚆𝙴𝚁𝙳 𝙱𝚈 𝚂𝙸𝙻𝙰 𝙼𝙳_`,
                 contextInfo: channelInfo
               }, { quoted: msg });
             } catch (error) {
