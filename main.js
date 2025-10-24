@@ -250,32 +250,23 @@ async function getAnimeImage(type) {
 // Text maker function
 async function createTextEffect(type, text) {
   try {
+    // Tumia APIs za nje kwa text effects
     const apis = {
-      metallic: `https://en.ephoto360.com/impressive-decorative-3d-metal-text-effect-798.html`,
-      ice: `https://en.ephoto360.com/ice-text-effect-online-101.html`,
-      snow: `https://en.ephoto360.com/create-a-snow-3d-text-effect-free-online-621.html`,
-      impressive: `https://en.ephoto360.com/create-3d-colorful-paint-text-effect-online-801.html`,
-      matrix: `https://en.ephoto360.com/matrix-text-effect-154.html`,
-      light: `https://en.ephoto360.com/light-text-effect-futuristic-technology-style-648.html`,
-      neon: `https://en.ephoto360.com/create-colorful-neon-light-text-effects-online-797.html`,
-      devil: `https://en.ephoto360.com/neon-devil-wings-text-effect-online-683.html`,
-      purple: `https://en.ephoto360.com/purple-text-effect-online-100.html`,
-      thunder: `https://en.ephoto360.com/thunder-text-effect-online-97.html`,
-      leaves: `https://en.ephoto360.com/green-brush-text-effect-typography-maker-online-153.html`,
-      '1917': `https://en.ephoto360.com/1917-style-text-effect-523.html`,
-      arena: `https://en.ephoto360.com/create-cover-arena-of-valor-by-mastering-360.html`,
-      hacker: `https://en.ephoto360.com/create-anonymous-hacker-avatars-cyan-neon-677.html`,
-      sand: `https://en.ephoto360.com/write-names-and-messages-on-the-sand-online-582.html`,
-      blackpink: `https://en.ephoto360.com/create-a-blackpink-style-logo-with-members-signatures-810.html`,
-      glitch: `https://en.ephoto360.com/create-digital-glitch-text-effects-online-767.html`,
-      fire: `https://en.ephoto360.com/flame-lettering-effect-372.html`
+      metallic: `https://api.erdwpe.com/api/photooxy/metal-dark?text=${encodeURIComponent(text)}`,
+      neon: `https://api.erdwpe.com/api/photooxy/neon?text=${encodeURIComponent(text)}`,
+      glitch: `https://api.erdwpe.com/api/photooxy/glitch?text=${encodeURIComponent(text)}`,
+      fire: `https://api.erdwpe.com/api/photooxy/flaming?text=${encodeURIComponent(text)}`,
+      thunder: `https://api.erdwpe.com/api/photooxy/thunder?text=${encodeURIComponent(text)}`,
+      matrix: `https://api.erdwpe.com/api/photooxy/matrix?text=${encodeURIComponent(text)}`,
+      blackpink: `https://api.erdwpe.com/api/photooxy/blackpink?text=${encodeURIComponent(text)}`,
+      shadow: `https://api.erdwpe.com/api/photooxy/shadow?text=${encodeURIComponent(text)}`
     };
 
-    // Using simplified API for text effects
-    const apiUrl = `https://api.erdwpe.com/api/photooxy/${type}?text=${encodeURIComponent(text)}`;
+    const apiUrl = apis[type] || apis.metallic;
     const response = await axios.get(apiUrl, { responseType: 'arraybuffer' });
     return Buffer.from(response.data);
   } catch (error) {
+    console.error('Error creating text effect:', error);
     return null;
   }
 }
