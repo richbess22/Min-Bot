@@ -8,7 +8,7 @@
     "start": "node main.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "npm:baileys-mod",
+    "@whiskeysockets/baileys": "npm:wileys",
     "@octokit/rest": "^20.0.2",
     "axios": "^1.11.0",
     "denethdev-ytmp3": "1.0.3",
